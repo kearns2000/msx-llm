@@ -40,6 +40,7 @@ set throttle off
 set ::typed 0
 set ::times {}
 set ::events {}
+set ::tenter 0
 proc hexdump {addr len} {
     binary scan [debug read_block memory $addr $len] H* h
     return $h
@@ -55,6 +56,7 @@ proc on_done {} {
     set f [open "%(out)s" w]
     puts $f "times [join $::times { }]"
     puts $f "events [join $::events { }]"
+    puts $f "tenter $::tenter"
     if {[catch {set scr [get_screen]} err]} {set scr "ERR $err"}
     puts $f "screen [string map [list \n |] $scr]"
     puts $f "seed [hexdump %(seed0)d 2]"
@@ -70,6 +72,7 @@ proc on_done {} {
 debug set_bp %(ev_ready)d {} on_ready
 debug set_bp %(ev_token)d {} {lappend ::times [machine_info time]}
 debug set_bp %(ev_done)d {} on_done
+debug set_bp %(encode)d {} {set ::tenter [machine_info time]}
 after time 4000 {exit}
 %(profile)s
 """
@@ -103,7 +106,7 @@ def run_msx(prompt, greedy, max_new, machine, profile=False):
         seed0=s["seed0"], ntok=s["ntok"], hist=0xAE00, plen=s["plen"],
         prompt_buf=0xAD00, hvec=0xA800 + 128, H=im.H, y=0xA000, ybytes=2 * im.V,
         ev_ready=s["ev_ready"], ev_token=s["ev_token"], ev_done=s["ev_done"],
-        profile=prof)
+        encode=s["encode"], profile=prof)
     tclpath = os.path.join(BUILD, "golden.tcl")
     open(tclpath, "w").write(tcl)
     t0 = time.time()
@@ -121,19 +124,11 @@ def run_msx(prompt, greedy, max_new, machine, profile=False):
     return d, wall
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--prompt", default="Once upon a time there was a little")
-    ap.add_argument("--greedy", action="store_true")
-    ap.add_argument("--max-new", type=int, default=12)
-    ap.add_argument("--machine", default="C-BIOS_MSX1")
-    ap.add_argument("--json", help="write results here")
-    ap.add_argument("--profile", action="store_true", help="per-phase time breakdown")
-    args = ap.parse_args()
-
+def run_case(prompt, greedy=False, max_new=12, machine="C-BIOS_MSX1", profile=False,
+             verbose=True):
     im = intref.load(os.path.join(BUILD, "model_int.npz"))
     tok = Tokenizer.load(os.path.join(ROOT, "data", "vocab.json"))
-    d, wall = run_msx(args.prompt, args.greedy, args.max_new, args.machine, args.profile)
+    d, wall = run_msx(prompt, greedy, max_new, machine, profile)
 
     b = lambda k: bytes.fromhex(d[k])  # noqa: E731
     seed = int.from_bytes(b("seed"), "little")
@@ -142,10 +137,11 @@ def main():
     h_z80 = np.frombuffer(b("h"), dtype=np.int8)
     y_z80 = np.frombuffer(b("y"), dtype="<i2").astype(np.int64)
     times = [float(t) for t in d["times"].split()] if d.get("times") else []
+    t_enter = float(d["tenter"]) if d.get("tenter") else None
 
-    ptxt = normalise(args.prompt)
+    ptxt = normalise(prompt)
     p_ids = tok.encode(ptxt)
-    ref = im.generate(p_ids, seed, max_new=args.max_new, greedy=args.greedy)
+    ref = im.generate(p_ids, seed, max_new=max_new, greedy=greedy)
     n_prompt = 1 + len(p_ids)
     z_prompt = hist[1:n_prompt]
     z_gen = hist[n_prompt:]
@@ -159,30 +155,35 @@ def main():
     }
     per_tok = np.diff(times)
     res = {
-        "prompt": args.prompt, "seed": seed, "greedy": args.greedy,
+        "prompt": prompt, "machine": machine, "seed": seed, "greedy": greedy,
+        "prompt_tokens": len(p_ids),
         "z80_text": tok.decode(z_gen), "ref_text": tok.decode(ref["tokens"]),
         "z80_tokens": z_gen, "ref_tokens": ref["tokens"],
-        "checks": checks,
+        "checks": checks, "passed": all(checks.values()),
         "emulated_s_per_token": float(per_tok.mean()) if len(per_tok) else None,
         "emulated_s_per_token_min_max": [float(per_tok.min()), float(per_tok.max())] if len(per_tok) else None,
-        "emulated_s_prompt_to_first_token": None,
+        "emulated_s_return_to_first_token": (times[0] - t_enter) if (times and t_enter) else None,
         "tokens_timed": len(times), "wall_clock_s": round(wall, 1),
+        "screen": d.get("screen", "").split("|"),
     }
-    print(f"prompt : {ptxt!r}  ({len(p_ids)} tokens)  seed {seed:#06x}")
-    print(f"MSX    : {res['z80_text']!r}")
-    print(f"python : {res['ref_text']!r}")
-    for k, v in checks.items():
-        print(f"  [{'PASS' if v else 'FAIL'}] {k}")
-    if len(per_tok):
-        print(f"emulated time per token: {per_tok.mean():.2f} s "
-              f"(min {per_tok.min():.2f}, max {per_tok.max():.2f}, n={len(per_tok)})")
-    if not checks["final logits (int16 x V)"]:
-        diff = np.nonzero(y_z80 != ref["logits"])[0]
-        print("  first logit diffs:", [(int(i), int(y_z80[i]), int(ref['logits'][i])) for i in diff[:8]])
-    if not checks["final h (int8 x H)"]:
-        diff = np.nonzero(h_z80 != ref["h"])[0]
-        print("  first h diffs:", [(int(i), int(h_z80[i]), int(ref['h'][i])) for i in diff[:8]])
-    if args.profile and d.get("events"):
+    if verbose:
+        print(f"[{machine}] prompt {ptxt!r} ({len(p_ids)} tokens) seed {seed:#06x}"
+              f"{' greedy' if greedy else ''}")
+        print(f"  MSX    : {res['z80_text']!r}")
+        print(f"  python : {res['ref_text']!r}")
+        for k, v in checks.items():
+            print(f"  [{'PASS' if v else 'FAIL'}] {k}")
+        if len(per_tok):
+            print(f"  emulated time per token: {per_tok.mean():.2f} s "
+                  f"(min {per_tok.min():.2f}, max {per_tok.max():.2f}, n={len(per_tok)}); "
+                  f"RETURN -> first token {res['emulated_s_return_to_first_token']:.2f} s")
+        if not checks["final logits (int16 x V)"]:
+            diff = np.nonzero(y_z80 != ref["logits"])[0]
+            print("  first logit diffs:", [(int(i), int(y_z80[i]), int(ref['logits'][i])) for i in diff[:8]])
+        if not checks["final h (int8 x H)"]:
+            diff = np.nonzero(h_z80 != ref["h"])[0]
+            print("  first h diffs:", [(int(i), int(h_z80[i]), int(ref['h'][i])) for i in diff[:8]])
+    if profile and d.get("events"):
         ev = d["events"].split()
         ev = [(ev[i], float(ev[i + 1])) for i in range(0, len(ev), 2)]
         pts = [i for i, (lab, _) in enumerate(ev) if lab == "print_tok"]
@@ -193,13 +194,27 @@ def main():
             ph = PROFILE_LABELS[lab]
             acc[ph] = acc.get(ph, 0.0) + (t1 - t0)
         tot = sum(acc.values())
-        print(f"profile over {ntoks} tokens (s/token, share):")
-        for ph, v in sorted(acc.items(), key=lambda kv: -kv[1]):
-            print(f"  {ph:26s} {v / ntoks:7.3f}  {100 * v / tot:5.1f}%")
+        if verbose:
+            print(f"  profile over {ntoks} tokens (s/token, share):")
+            for ph, v in sorted(acc.items(), key=lambda kv: -kv[1]):
+                print(f"    {ph:26s} {v / ntoks:7.3f}  {100 * v / tot:5.1f}%")
         res["profile_s_per_token"] = {k: v / ntoks for k, v in acc.items()}
+    return res
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--prompt", default="Once upon a time there was a little")
+    ap.add_argument("--greedy", action="store_true")
+    ap.add_argument("--max-new", type=int, default=12)
+    ap.add_argument("--machine", default="C-BIOS_MSX1")
+    ap.add_argument("--json", help="write results here")
+    ap.add_argument("--profile", action="store_true", help="per-phase time breakdown")
+    args = ap.parse_args()
+    res = run_case(args.prompt, args.greedy, args.max_new, args.machine, args.profile)
     if args.json:
         json.dump(res, open(args.json, "w"), indent=1)
-    sys.exit(0 if all(checks.values()) else 1)
+    sys.exit(0 if res["passed"] else 1)
 
 
 if __name__ == "__main__":
