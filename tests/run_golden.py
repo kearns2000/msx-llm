@@ -39,6 +39,7 @@ set renderer none
 set throttle off
 set ::typed 0
 set ::times {}
+set ::events {}
 proc hexdump {addr len} {
     binary scan [debug read_block memory $addr $len] H* h
     return $h
@@ -53,6 +54,7 @@ proc on_ready {} {
 proc on_done {} {
     set f [open "%(out)s" w]
     puts $f "times [join $::times { }]"
+    puts $f "events [join $::events { }]"
     if {[catch {set scr [get_screen]} err]} {set scr "ERR $err"}
     puts $f "screen [string map [list \n |] $scr]"
     puts $f "seed [hexdump %(seed0)d 2]"
@@ -69,21 +71,39 @@ debug set_bp %(ev_ready)d {} on_ready
 debug set_bp %(ev_token)d {} {lappend ::times [machine_info time]}
 debug set_bp %(ev_done)d {} on_done
 after time 4000 {exit}
+%(profile)s
 """
 
+PROFILE_LABELS = {  # label -> phase that starts there
+    "feed": "embedding copy", "matvec": "bias copy", "matvec.chunk": "table build",
+    "matvec.seg": "ternary kernel", "gate_update": "gate update (LUT, mul)",
+    "out_layer": "setup", "sample": "top-K + sampling", "print_tok": "print token",
+    "ev_token": "bookkeeping",
+}
 
-def run_msx(prompt, greedy, max_new, machine):
+
+def tcl_escape(s):
+    return "".join("\\" + c if c in '\\"[]$' else c for c in s)
+
+
+def run_msx(prompt, greedy, max_new, machine, profile=False):
     s = symbols()
+    prof = ""
+    if profile:
+        prof = "\n".join(
+            "debug set_bp %d {} {if {[llength $::times]} {lappend ::events %s [machine_info time]}}"
+            % (s[lab], lab) for lab in PROFILE_LABELS)
     im = intref.load(os.path.join(BUILD, "model_int.npz"))
     out = os.path.join(BUILD, "golden_out.txt").replace("\\", "/")
     if os.path.exists(out):
         os.remove(out)
     tcl = TCL % dict(
         greedy_addr=s["greedy"], greedy=int(greedy), maxnew_addr=s["MAN"] + 24,
-        max_new=max_new, prompt=prompt.replace('"', '\\"'), out=out,
+        max_new=max_new, prompt=tcl_escape(prompt), out=out,
         seed0=s["seed0"], ntok=s["ntok"], hist=0xAE00, plen=s["plen"],
         prompt_buf=0xAD00, hvec=0xA800 + 128, H=im.H, y=0xA000, ybytes=2 * im.V,
-        ev_ready=s["ev_ready"], ev_token=s["ev_token"], ev_done=s["ev_done"])
+        ev_ready=s["ev_ready"], ev_token=s["ev_token"], ev_done=s["ev_done"],
+        profile=prof)
     tclpath = os.path.join(BUILD, "golden.tcl")
     open(tclpath, "w").write(tcl)
     t0 = time.time()
@@ -108,11 +128,12 @@ def main():
     ap.add_argument("--max-new", type=int, default=12)
     ap.add_argument("--machine", default="C-BIOS_MSX1")
     ap.add_argument("--json", help="write results here")
+    ap.add_argument("--profile", action="store_true", help="per-phase time breakdown")
     args = ap.parse_args()
 
     im = intref.load(os.path.join(BUILD, "model_int.npz"))
     tok = Tokenizer.load(os.path.join(ROOT, "data", "vocab.json"))
-    d, wall = run_msx(args.prompt, args.greedy, args.max_new, args.machine)
+    d, wall = run_msx(args.prompt, args.greedy, args.max_new, args.machine, args.profile)
 
     b = lambda k: bytes.fromhex(d[k])  # noqa: E731
     seed = int.from_bytes(b("seed"), "little")
@@ -161,6 +182,21 @@ def main():
     if not checks["final h (int8 x H)"]:
         diff = np.nonzero(h_z80 != ref["h"])[0]
         print("  first h diffs:", [(int(i), int(h_z80[i]), int(ref['h'][i])) for i in diff[:8]])
+    if args.profile and d.get("events"):
+        ev = d["events"].split()
+        ev = [(ev[i], float(ev[i + 1])) for i in range(0, len(ev), 2)]
+        pts = [i for i, (lab, _) in enumerate(ev) if lab == "print_tok"]
+        ev = ev[pts[0]:pts[-1] + 1]       # whole cycles: print -> feed -> out -> sample
+        ntoks = len(pts) - 1
+        acc = {}
+        for (lab, t0), (_, t1) in zip(ev, ev[1:]):
+            ph = PROFILE_LABELS[lab]
+            acc[ph] = acc.get(ph, 0.0) + (t1 - t0)
+        tot = sum(acc.values())
+        print(f"profile over {ntoks} tokens (s/token, share):")
+        for ph, v in sorted(acc.items(), key=lambda kv: -kv[1]):
+            print(f"  {ph:26s} {v / ntoks:7.3f}  {100 * v / tot:5.1f}%")
+        res["profile_s_per_token"] = {k: v / ntoks for k, v in acc.items()}
     if args.json:
         json.dump(res, open(args.json, "w"), indent=1)
     sys.exit(0 if all(checks.values()) else 1)

@@ -498,6 +498,8 @@ build_tables:
         ld de,4
         add hl,de
         ld (bt_src),hl
+        ld a,(bt_page)
+        ld h,a
         call fill
         ld a,(bt_page)
         add a,2
@@ -509,7 +511,20 @@ build_tables:
         ret
 
 ; mk_pair: HL -> (a, b) int8.  IX[0..8] = b*cb + a*ca for the 9 nibble codes
-;   in order 0,1,3,4,5,7,12,13,15
+;   in order 0,1,3,4,5,7,12,13,15  (cb, ca in {0,+1,-1})
+        MACRO TRIP ofs          ; IX[ofs..] = base, base+a, base-a  (HL=base)
+        ld (ix+ofs+0),l
+        ld (ix+ofs+1),h
+        push hl
+        add hl,bc
+        ld (ix+ofs+2),l
+        ld (ix+ofs+3),h
+        pop hl
+        or a
+        sbc hl,bc
+        ld (ix+ofs+4),l
+        ld (ix+ofs+5),h
+        ENDM
 mk_pair:
         ld a,(hl)
         ld c,a
@@ -523,31 +538,19 @@ mk_pair:
         sbc a,a
         ld d,a                  ; DE = b
         ld hl,0
-        call trip
+        TRIP 0
         ld h,d
         ld l,e
-        call trip
+        TRIP 6
         ld hl,0
         or a
         sbc hl,de
-        ; fall through
-trip:   ld (ix+0),l             ; base, base+a, base-a
-        ld (ix+1),h
-        push hl
-        add hl,bc
-        ld (ix+2),l
-        ld (ix+3),h
-        pop hl
-        or a
-        sbc hl,bc
-        ld (ix+4),l
-        ld (ix+5),h
-        REPT 6
-        inc ix
-        ENDR
+        TRIP 12
         ret
 
-        MACRO ENT               ; T[L] = ATAB[i] + BC
+; fill: H = lo page of this group.  T[hi<<4|lo] = ATAB[lo] + BTAB[hi]
+;   fully unrolled over the 81 valid codes (L walks the 9 lo codes per row)
+        MACRO ENT               ; T[L] = ATAB[i] + BC ; DE -> ATAB[i]
         ld a,(de)
         add a,c
         ld (hl),a
@@ -559,26 +562,10 @@ trip:   ld (ix+0),l             ; base, base+a, base-a
         dec h
         inc e
         ENDM
-fill:   ld hl,BTAB
-        ld (bt_bp),hl
-        ld hl,lbases
-        ld (bt_lb),hl
-        ld a,9
-        ld (bt_cnt),a
-.o:     ld hl,(bt_bp)
-        ld c,(hl)
-        inc hl
-        ld b,(hl)
-        inc hl
-        ld (bt_bp),hl
-        ld hl,(bt_lb)
-        ld a,(hl)
-        inc hl
-        ld (bt_lb),hl
-        ld l,a
-        ld a,(bt_page)
-        ld h,a
+        MACRO FROW bofs, lbase
+        ld bc,(BTAB+bofs)
         ld de,ATAB
+        ld l,lbase
         ENT
         inc l
         ENT
@@ -592,21 +579,24 @@ fill:   ld hl,BTAB
         inc l
         inc l
         ENT
-        ld a,l
-        add a,5
-        ld l,a
+        ld l,lbase+12
         ENT
         inc l
         ENT
         inc l
         inc l
         ENT
-        ld a,(bt_cnt)
-        dec a
-        ld (bt_cnt),a
-        jp nz,.o
+        ENDM
+fill:   FROW 0,00h
+        FROW 2,10h
+        FROW 4,30h
+        FROW 6,40h
+        FROW 8,50h
+        FROW 10,70h
+        FROW 12,0C0h
+        FROW 14,0D0h
+        FROW 16,0F0h
         ret
-lbases: db 00h,10h,30h,40h,50h,70h,0C0h,0D0h,0F0h
 
 ; -----------------------------------------------------------------------------
 ; sample: top-K over Y[0..V-1], LUT softmax, xorshift draw.  -> HL = token
@@ -1005,7 +995,11 @@ ev_ready:                       ; test hook: waiting for keyboard input
         jr .k
 .done:  ld a,(plen)
         cp 2
-        ret c
+        jr nc,.strip
+        xor a                   ; nothing typed: empty prompt
+        ld (plen),a
+        ret
+.strip:
         dec a
         ld l,a
         ld h,PROMPT>>8
@@ -1168,9 +1162,6 @@ mv_sp:      ds 2
 bt_src:     ds 2
 bt_page:    ds 1
 bt_g:       ds 1
-bt_bp:      ds 2
-bt_lb:      ds 2
-bt_cnt:     ds 1
 gu_z:       ds 2
 gu_n:       ds 2
 gu_h:       ds 2
