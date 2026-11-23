@@ -1,6 +1,6 @@
 """Check that the QAT training forward pass computes exactly what the integer
-reference (and therefore the Z80) computes: same int8 hidden states, same int16
-at every step, on real validation text.
+reference (and therefore the Z80) computes: the same int8 hidden state at every
+step, on real validation text.
 
 usage: python tests/test_qat_vs_intref.py [--ckpt runs/model.pt]
 """

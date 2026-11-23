@@ -1,7 +1,8 @@
 """One-shot build: checkpoint -> ROM data banks -> assembled .rom
 
 usage: python build.py [--ckpt runs/model.pt] [--temp 0.8] [--topk 8] [--eval]
-Produces build/msxllm.rom (ASCII8 MegaROM) and build/msxllm.sym.
+Produces build/msxllm.rom (ASCII8 MegaROM) and build/msxllm.sym
+(also regenerates docs/banner.svg and the boot-splash bitmap build/splash.bin).
 """
 import os
 import subprocess
@@ -14,6 +15,7 @@ SJASM = os.environ.get("SJASMPLUS", os.path.join(
 
 def main():
     py = sys.executable
+    subprocess.run([py, os.path.join(ROOT, "docs", "make_banner.py")], check=True, cwd=ROOT)
     subprocess.run([py, os.path.join(ROOT, "export", "pack.py")] + sys.argv[1:],
                    check=True, cwd=ROOT)
     r = subprocess.run([SJASM, "--nologo", "--msg=war", "--sym=build/msxllm.sym",

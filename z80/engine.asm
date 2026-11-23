@@ -17,6 +17,15 @@ LINL40  equ 0F3AEh
 CLIKSW  equ 0F3DBh
 JIFFY   equ 0FC9Eh
 EXPTBL  equ 0FCC1h
+SLTTBL  equ 0FCC5h              ; BIOS copy of each expanded slot's subslot reg
+CHSNS   equ 009Ch
+INIGRP  equ 0072h
+LDIRVM  equ 005Ch
+FILVRM  equ 0056h
+CGTABL  equ 0004h
+FORCLR  equ 0F3E9h
+BAKCLR  equ 0F3EAh
+BDRCLR  equ 0F3EBh
 
 ; ---- cartridge --------------------------------------------------------------
 BANKREG equ 6800h               ; ASCII8: bank for 6000h-7FFFh window
@@ -68,9 +77,17 @@ B_LUTE  equ 8
         dw 0,0,0,0,0,0
 
 start:
-        di
+        di                      ; still on the BIOS stack (page 3) here: our
+        call ram_page2          ; stack lives in page 2, so it must be RAM first
+        ld hl,8000h             ; need RAM at 8000h-BFFFh (>= 32 KB machine)
+        ld a,(hl)
+        cpl
+        ld (hl),a
+        cp (hl)
+        jp nz,no_ram
+        cpl
+        ld (hl),a
         ld sp,STACK
-        call ram_page2
         ld a,1                  ; manifest: bank 1, offset 0
         ld hl,0
         ld de,MAN
@@ -85,6 +102,7 @@ start:
         ld a,B_LUTE
         ld de,LUTE
         call load256
+        call splash
         ld a,40
         ld (LINL40),a
         call INITXT
@@ -196,8 +214,8 @@ feed:
         ld l,0
         srl h
         rr l                    ; (token & 63) * 128
-        ld de,(tmp_off)
-        add hl,de
+        ld de,(tmp_off)         ; EMB starts a bank (export/pack.py asserts it),
+        add hl,de               ; so this offset is 0 and rows never straddle
         ld a,c
         ld de,VEC
         ld bc,128
@@ -888,7 +906,10 @@ encode:
         ld (ntok),hl
         jp .next
 
-; print_tok: HL = token id.  Word-wraps at 40 columns on leading spaces.
+; print_tok: HL = token id.  Word wrap: a token starting with a space must
+;   end by column 39, any other token by column 40 (so punctuation after a
+;   word still fits on its line); otherwise it starts a new line, dropping
+;   its leading space.  The BIOS would otherwise wrap mid-token at column 40.
 print_tok:
         ld (pt_id),hl
         ld a,B_VOCAB
@@ -911,13 +932,17 @@ print_tok:
         ld a,b
         or a
         ret z
+        ld c,41                 ; a token may end in column 40 ...
         ld a,(hl)
         cp ' '
-        jr nz,.pr
-        ld a,(CSRX)
+        jr nz,.lim
+        dec c                   ; ... but a word ends by column 39, keeping
+.lim:   ld a,(CSRX)             ; column 40 free for a following , . ! ?
+        cp 2
+        jr c,.pr                ; already at the start of a line
         dec a
         add a,b
-        cp 41
+        cp c
         jr c,.pr
         push hl
         push bc
@@ -927,6 +952,9 @@ print_tok:
         call CHPUT
         pop bc
         pop hl
+        ld a,(hl)               ; drop a leading space at the new line
+        cp ' '
+        jr nz,.pr
         inc hl
         dec b
         ret z
@@ -1087,6 +1115,7 @@ romcopy:
         jr .lp
 
 ; ram_page2: map page 2 (8000h-BFFFh) to the RAM slot of page 3
+;   (primary slot via port A8h; subslot via FFFFh + BIOS SLTTBL if expanded)
 ram_page2:
         in a,(0A8h)
         ld d,a
@@ -1110,6 +1139,11 @@ ram_page2:
         and 0CFh
         or c
         ld (0FFFFh),a
+        inc hl                  ; EXPTBL+slot -> SLTTBL+slot: keep the BIOS
+        inc hl                  ; copy in sync, or the next inter-slot call
+        inc hl                  ; (e.g. a disk ROM's H.TIMI hook) would
+        inc hl                  ; switch page 2 away from RAM again
+        ld (hl),a
 .prim:  ld a,d
         and 0C0h
         rrca
@@ -1121,10 +1155,122 @@ ram_page2:
         out (0A8h),a
         ret
 
+; -----------------------------------------------------------------------------
+; splash: SCREEN 2 boot screen with the colour block banner (pre-rendered by
+;   docs/make_banner.py) and three text lines in the BIOS font.  Leaves after
+;   a key press (which is swallowed) or 180 frames, then restores the colours.
+; -----------------------------------------------------------------------------
+splash:
+        ld hl,(FORCLR)          ; FORCLR, BAKCLR
+        ld (sp_clr),hl
+        ld a,(BDRCLR)
+        ld (sp_clr+2),a
+        ld a,15
+        ld (FORCLR),a
+        ld a,1
+        ld (BAKCLR),a
+        ld (BDRCLR),a
+        call INIGRP
+        di
+        ld hl,splash_bin        ; banner: patterns, then colours
+        ld de,0700h
+        ld bc,1280
+        call LDIRVM
+        ld hl,splash_bin+1280
+        ld de,2700h
+        ld bc,1280
+        call LDIRVM
+        ld hl,sp_text
+.line:  ld a,(hl)               ; row (0FFh ends)
+        cp 0FFh
+        jr z,.wait
+        inc hl
+        ld e,(hl)               ; column
+        inc hl
+        ld c,(hl)               ; colour byte (fg<<4 | bg)
+        inc hl
+        ; DE = VRAM pattern address = (row*32 + col) * 8
+        ld d,a
+        ld a,e
+        add a,a
+        add a,a
+        add a,a
+        ld e,a                  ; col*8 (col < 32)
+.ch:    ld a,(hl)
+        inc hl
+        or a
+        jr z,.line
+        push hl
+        push de
+        push bc
+        ld l,a
+        ld h,0
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ld bc,(CGTABL)
+        add hl,bc               ; BIOS font glyph
+        ld bc,8
+        push de
+        call LDIRVM
+        pop hl
+        ld de,2000h
+        add hl,de               ; colour table address
+        pop bc
+        push bc
+        ld a,c
+        ld bc,8
+        call FILVRM
+        pop bc
+        pop de
+        pop hl
+        ld a,e
+        add a,8
+        ld e,a
+        jr .ch
+.wait:  ei
+        ld hl,(JIFFY)
+        ld (sp_t0),hl
+.w:     call CHSNS
+        jr nz,.key
+        ld hl,(JIFFY)
+        ld de,(sp_t0)
+        or a
+        sbc hl,de
+        ld de,180
+        or a
+        sbc hl,de
+        jr c,.w
+        jr .done
+.key:   call CHGET
+.done:  di
+        ld hl,(sp_clr)
+        ld (FORCLR),hl
+        ld a,(sp_clr+2)
+        ld (BDRCLR),a
+        ret
+sp_text:                        ; row, column, colour, text, 0
+        db 14,3,0F1h,"TERNARY RNN ON A PURE Z80",0
+        db 16,1,0E1h,"0.79M 2-BIT WEIGHTS  512KB ROM",0
+        db 20,9,0A1h,"PRESS ANY KEY",0
+        db 0FFh
+splash_bin:
+        INCBIN "../build/splash.bin"
+
+no_ram: call INITXT
+        ld hl,msg_noram
+        call puts
+.halt:  jr .halt
+msg_noram:
+        db "MSX-LLM needs 32 KB of RAM.",0
 msg_banner:
-        db "MSX-LLM v1  ternary RNN, pure Z80",13,10
-        db "0.79M 2-bit weights in ROM. Type the",13,10
-        db "start of a story, or just RETURN.",13,10,0
+        db "MSX-LLM v1  By Patrick Kearns",13,10
+        db "Ternary RNN, pure Z80. 0.79M 2-bit",13,10
+        db "weights in ROM.",13,10
+        db 13,10
+        db 13,10
+        db "Type the start of a story, or just",13,10
+        db "press RETURN.",13,10,0
 msg_prompt:
         db 13,10,"> ",0
 
@@ -1183,4 +1329,6 @@ rc_bank:    ds 1
 rc_off:     ds 2
 rc_dst:     ds 2
 rc_len:     ds 2
+sp_clr:     ds 3
+sp_t0:      ds 2
 vars_end:

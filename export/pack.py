@@ -80,6 +80,10 @@ def build(im, vocab):
     assert (E + H) % 64 == 0 and H % 64 == 0
     assert 2 * H <= 1024 and V <= 1024, "Y buffer is 1024 words"
     assert E + H <= 512, "VEC buffer is 512 bytes"
+    # engine buffers: TOPV/WBUF hold 16 candidates; HIST holds 256 token ids =
+    # <eos> + up to 120 prompt tokens (120-char input line) + generated tokens
+    assert 1 <= im.topk <= 16 and im.topk <= V, f"topk must be 1..16, got {im.topk}"
+    assert 1 <= im.max_new <= 135, f"max_new must be 1..135, got {im.max_new}"
     vb = bytearray()
     for i, s in enumerate(vocab):
         b = s.encode("ascii")
@@ -94,6 +98,7 @@ def build(im, vocab):
     rom.put_at("LUTE", 0x300, im.lute.astype(np.uint8).tobytes())
     rom.put_at("VOCAB", 0x400, bytes(vb))
     rom.put("EMB", im.emb.astype(np.int8).tobytes(), align=BANK)
+    assert rom.loc["EMB"] % BANK == 0, "engine assumes EMB starts a bank"
     rom.put("BG", np.concatenate([im.bz, im.bn]).astype("<i2").tobytes())
     rom.put("WG", pack_ternary(np.concatenate([im.wz, im.wn], 0)))
     rom.put("BO", im.bo.astype("<i2").tobytes())
@@ -147,8 +152,8 @@ def main():
     model.load_state_dict(ck["state"])
     im = intref.quantize(model, args.temp, args.topk, args.max_new)
     os.makedirs(os.path.join(ROOT, "build"), exist_ok=True)
-    intref.save(im, os.path.join(ROOT, "build", "model_int.npz"))
     data, info = build(im, vocab)
+    intref.save(im, os.path.join(ROOT, "build", "model_int.npz"))
     open(os.path.join(ROOT, "build", "model_data.bin"), "wb").write(data)
     info["valid_loss_float_ckpt"] = ck.get("valid_loss")
     if args.eval:

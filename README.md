@@ -1,4 +1,16 @@
+<p align="center"><img src="docs/banner.svg" alt="MSX-LLM" width="720"></p>
+
 # msx-llm: a ternary language model on a stock MSX1
+
+![Platform: MSX1](https://img.shields.io/badge/platform-MSX1-blue)
+![CPU: Z80 3.58 MHz](https://img.shields.io/badge/CPU-Z80%203.58%20MHz-orange)
+![Weights: ternary 2-bit](https://img.shields.io/badge/weights-ternary%202--bit-purple)
+![Parameters: 0.92M](https://img.shields.io/badge/parameters-0.92M-informational)
+![ROM: 512 KB ASCII8](https://img.shields.io/badge/ROM-512%20KB%20ASCII8-lightgrey)
+![Speed: 4.14 s/token](https://img.shields.io/badge/speed-4.14%20s%2Ftoken-yellow)
+![Golden tests: 6/6 bit-exact](https://img.shields.io/badge/golden%20tests-6%2F6%20bit--exact-brightgreen)
+![Assembler: sjasmplus](https://img.shields.io/badge/assembler-sjasmplus-9cf)
+![Data: TinyStories CDLA-Sharing-1.0](https://img.shields.io/badge/data-TinyStories%20(CDLA--Sharing--1.0)-green)
 
 A tiny language model that runs on an **unmodified MSX1**: a 3.58 MHz Z80 with 64 KB of RAM.
 There is no turbo R, no R800, no FPGA or coprocessor cartridge, and no speed-up.
@@ -6,10 +18,10 @@ The weights live in a 512 KB **ASCII8 MegaROM** image. You type the start of a s
 MSX continues it one token at a time, at about **4.1 seconds per token** (measured on an
 emulated MSX1).
 
-![MSX screen](docs/screen.png)
+<p align="center"><img src="docs/screen.png" alt="MSX-LLM generating a story on an MSX1" width="600"></p>
 
 The idea is the "pure" counterpart of the 2.2M-parameter model on a Super Nintendo
-(The Register, 21 Nov 2026), done with:
+(The Register, 21 Nov 2026) https://www.theregister.com/offbeat/2026/11/21/chatgpt-shrunk-down-to-run-on-a-super-nintendo/5311418, done with:
 
 * **ternary weights** {-1, 0, +1} (BitNet b1.58 style), so the inner loop never multiplies;
 * **a lookup-table matvec kernel** that adds 4 weights with one 16-bit table lookup;
@@ -29,15 +41,35 @@ and bit-exact golden tests against a Python integer reference running in openMSX
 | Model | single-layer gated RNN (GRU without reset gate), E=128, H=384, V=1024 |
 | Parameters | **786,432 ternary weights** (2 bits each) + 131,072 int8 embeddings + 1,792 int16 biases = **0.92 M** |
 | ROM | 512 KB ASCII8 (8 KB code bank + 339 KB data used) |
-| RAM used | 32 KB, 8000h–BFFFh only (page 2). Page 3 is left to the BIOS |
+| RAM used | 32 KB, 8000h-BFFFh only (page 2). Page 3 is left to the BIOS |
 | Speed, measured | **4.14 s/token** on openMSX `C-BIOS_MSX1` (Z80 3.579545 MHz, MSX M1 wait states emulated) |
 | Prompt cost | about 2.1 s per prompt token, plus greedy tokenisation |
 | Golden tests | 6/6 cases bit-exact (prompt tokens, sampled tokens, final hidden state, all 1024 logits) |
-| Quality | __QUALITY__ |
+| Quality | validation loss **2.50 nats/token** (perplexity 12.2, BPE-1024 tokens). The integer model scores exactly the same as the float QAT model on the same tokens |
 
 Sample generations, produced on the emulated MSX and identical to the Python reference:
 
-__SAMPLES__
+The **bold** part is the prompt. Each sample is 48 sampled tokens (top-K 8,
+temperature 0.8) and took about 3.3 emulated minutes:
+
+> **Once upon a time**, there was a little girl named Sue. Sue loved to eat milk and eat all
+> her favorite moment. One day, she went to the park to play and find her friend, Tim. Sue
+> had a friend named
+
+> **Lily and Tom went to the beach** with his mom. They saw many big, red balloons. They
+> played with the balloon and had lots of fun. They had a blue mark in the park. They saw
+> many balls on the ground. It was a
+
+> **The little dog was hungry**. He wanted to restore the bag. He looked around and saw a
+> little girl looking at him. The dog said, "Why are you surrender?" The baby looked at Tom
+> and her dog and
+
+> *(empty prompt)* Once there was a little girl called Jane. She was three years old and he
+> liked to explore. Every day she would go to the pillow and look around. One day, he
+> decided to go expl
+
+The grammar is mostly right and the TinyStories register is unmistakable. Meaning drifts
+within a few sentences, and pronouns and objects don't stay consistent.
 
 ---
 
@@ -71,8 +103,40 @@ tools\openmsx\openmsx.exe -machine C-BIOS_MSX1 -carta build\msxllm.rom -romtype 
 ```
 
 Real hardware: write `build/msxllm.rom` to any flash cartridge that can emulate an ASCII8
-mapper, for example a MegaFlashROM SCC+ or a Carnivore2. You need at least 32 KB of RAM.
+mapper, for example a MegaFlashROM SCC+ or a Carnivore2. You need at least 32 KB of RAM (the ROM checks it and says so).
 This has **not** been tried on a real MSX yet; see the limitations section.
+
+---
+
+## Usage
+
+All four screens below are real: openMSX ran the ROM on the `C-BIOS_MSX1` machine, and
+`tests/screenshot.py` decoded the MSX video memory into an image.
+
+| 1. Boot splash | 2. Ready for a prompt |
+|---|---|
+| ![Boot splash](docs/splash.png) | ![Waiting for input](docs/ready.png) |
+| The cartridge starts in SCREEN 2 with the banner. Press any key, or wait 3 seconds. | The 40-column text UI. `>` is the input line. |
+| **3. Type the start of a story** | **4. Press RETURN and watch it write** |
+| ![Prompt typed](docs/typed.png) | ![Generating](docs/screen.png) |
+| Type up to 119 characters. BACKSPACE works, and extra spaces are ignored. | Tokens appear one at a time, about 4 seconds apart, word-wrapped at 40 columns. |
+
+* **What happens after RETURN**: the prompt is tokenised on the Z80 and fed through the
+  RNN, at about 2 seconds per prompt token. Then up to 48 new tokens are generated. A
+  story stops early if the model emits `<eos>`. The `>` prompt then comes back for the
+  next story, which starts from a fresh hidden state.
+* **Just RETURN** with an empty prompt lets the model start a story from scratch, usually
+  "Once upon a time..." or "Once there was...".
+* **Every run is different**: sampling is seeded from the MSX frame counter at the moment
+  you press RETURN.
+* **Regenerating the screenshots**:
+
+```powershell
+.venv\Scripts\python tests\screenshot.py --stage splash --out docs\splash.png
+.venv\Scripts\python tests\screenshot.py --stage ready --out docs\ready.png
+.venv\Scripts\python tests\screenshot.py --stage typed --prompt "Once upon a time" --out docs\typed.png
+.venv\Scripts\python tests\screenshot.py --stage done --prompt "Once upon a time" --out docs\screen.png
+```
 
 ---
 
@@ -84,7 +148,7 @@ The cost that matters here is Z80 cycles, and the Z80 has no multiply instructio
 
 * **Attention multiplies activations by activations** (q·k, softmax·v). With ternary
   weights, a matvec only adds and subtracts. Attention cannot do that. On the Z80, an 8×8
-  multiply is roughly 150–250 T-states, against about 15 T-states per ternary weight.
+  multiply is roughly 150-250 T-states, against about 15 T-states per ternary weight.
 * **A KV cache doesn't fit.** There is 64 KB of RAM in total, and the cartridge occupies
   page 1. An RNN state is 384 bytes.
 * **Constant time per token.** The RNN does the same work for token 1 and token 200.
@@ -107,7 +171,7 @@ logit  = Wo_t · h_q' + bo                       int16, V = 1024
 
 * **Ternary weights** follow BitNet b1.58: `W_t = clamp(round(W / mean|W|), -1, 1)`, one
   scale per tensor. The scale is **folded into the LUTs**: the shift `k` and the LUT
-  contents depend on it, so the Z80 never rescales anything. 39% of weights are zero.
+  contents depend on it, so the Z80 never rescales anything. 49% of the trained ternary weights are zero.
 * **Activations are int8** with a fixed scale of 1/127. The GRU state is bounded by
   tanh, so it needs no dynamic absmax. Embeddings are clamped to [-1, 1] and stored as
   int8.
@@ -121,6 +185,10 @@ logit  = Wo_t · h_q' + bo                       int16, V = 1024
 * **Sampling** is top-K (K=8) with a 256-entry `exp` LUT over logit differences
   (temperature 0.8, baked in at export). The draw uses a 16-bit xorshift PRNG seeded from
   the frame counter when RETURN is pressed. Greedy decoding is a RAM flag, used by the tests.
+* **Boot splash**: the MSX starts in SCREEN 2 with the colour-block banner. It uses
+  TMS9918A palette colours, with one colour per letter and at most 2 colours per 8-pixel
+  span, so there is no attribute clash. It stays up until a key is pressed or for 3 s,
+  then switches to the 40-column text UI.
 * **Tokenizer**: BPE learned on TinyStories word counts (1024 entries: `<eos>` + 78
   printable chars + merges). Encoding is **greedy longest match**, because that is
   trivial on a Z80 and identical in Python. Tokens never contain an inner space. That
@@ -158,16 +226,16 @@ Per row-chunk (64 weights), that's 821 T-states plus 163 M1 wait states (MSX add
 wait state to every opcode fetch). Total: **984 T, or 15.4 T-states per weight**. The
 kernel has no data-dependent branches, so its speed doesn't depend on the weights.
 
-### ROM layout (ASCII8, 8 KB banks; window 6000h–7FFFh is switched via register 6800h)
+### ROM layout (ASCII8, 8 KB banks; window 6000h-7FFFh is switched via register 6800h)
 
 | bank | contents |
 |---|---|
-| 0 | engine code (3.1 KB), mapped at 4000h–5FFFh |
+| 0 | engine code + boot-splash bitmap (5.9 KB), mapped at 4000h-5FFFh |
 | 1 | manifest (96 B: magic `MSXLLM01`, dims, shifts, block table), LUT_Z, LUT_N, LUT_E, vocab strings (length-prefixed, 5 KB) |
-| 2–17 | embeddings, 1024 × 128 int8 (64 rows per bank) |
-| 18–30 | gate biases (2H int16), then gate weights, packed 2 bits per weight, chunk-major (`[chunk][row][16 bytes]`) |
-| 30–42 | output biases (V int16), then output weights, same packing |
-| 43–63 | padding (0xFF) up to 512 KB |
+| 2-17 | embeddings, 1024 × 128 int8 (64 rows per bank) |
+| 18-30 | gate biases (2H int16), then gate weights, packed 2 bits per weight, chunk-major (`[chunk][row][16 bytes]`) |
+| 30-42 | output biases (V int16), then output weights, same packing |
+| 43-63 | padding (0xFF) up to 512 KB |
 
 The engine reads everything through the manifest's block table, so a retrained model of
 the same shape only needs a re-export. Blocks are 16-byte aligned, so a row-chunk never
@@ -177,22 +245,22 @@ straddles a bank. The driver splits row ranges at bank boundaries.
 
 | address | size | use |
 |---|---|---|
-| 8000h–9FFFh | 8 KB | partial-sum tables, 16 groups × (lo page, hi page) |
-| A000h–A7FFh | 2 KB | `Y`: 1024 × int16 accumulators (gate pre-activations or logits) |
-| A800h–A9FFh | 512 B | `VEC` = [x (128) ; h (384)] int8 |
-| AA00h–ACFFh | 768 B | LUT_Z, LUT_N, LUT_E (copied from ROM) |
-| AD00h–AFFFh | 768 B | prompt text, token history (256 × u16) |
-| B100h–B2FFh | 512 B | 9-entry pair tables, engine variables |
-| B300h–BFFFh | | stack (SP starts at C000h) |
-| C000h–FFFFh | | untouched (BIOS work area) |
+| 8000h-9FFFh | 8 KB | partial-sum tables, 16 groups × (lo page, hi page) |
+| A000h-A7FFh | 2 KB | `Y`: 1024 × int16 accumulators (gate pre-activations or logits) |
+| A800h-A9FFh | 512 B | `VEC` = [x (128) ; h (384)] int8 |
+| AA00h-ACFFh | 768 B | LUT_Z, LUT_N, LUT_E (copied from ROM) |
+| AD00h-AFFFh | 768 B | prompt text, token history (256 × u16) |
+| B100h-B2FFh | 512 B | 9-entry pair tables, engine variables |
+| B300h-BFFFh | | stack (SP starts at C000h) |
+| C000h-FFFFh | | untouched (BIOS work area) |
 
 ---
 
 ## Cycle budget per token
 
-* **Before implementation**: the parent plan estimated **5–15 s/token**, based on ~1 M
-  weights at 20–30 T per weight with a direct add/sub kernel. The LUT kernel's design
-  estimate was 13–14 T per weight + ~10% for table builds, which comes to **≈3.5–4 s**.
+* **Before implementation**: the parent plan estimated **5-15 s/token**, based on ~1 M
+  weights at 20-30 T per weight with a direct add/sub kernel. The LUT kernel's design
+  estimate was 13-14 T per weight + ~10% for table builds, which comes to **≈3.5-4 s**.
 * **Instruction-count model vs measured.** The measurement is openMSX emulated time
   between `ev_token` breakpoints, broken down with breakpoints at each phase
   (`tests/run_golden.py --profile`):
@@ -226,8 +294,8 @@ against `train/intref.py`:
 
 `tests/run_all.py` runs 6 cases: sampling, greedy, an empty prompt, quotes and
 punctuation, the 50 Hz `C-BIOS_MSX1_EU` machine, and a profiled run. Results go to
-`build/test_results.json`. `tests/screenshot.py` renders SCREEN 0 straight from VRAM to a
-PNG.
+`build/test_results.json`. `tests/screenshot.py` decodes SCREEN 0 or SCREEN 2 straight from VRAM to a PNG, at any
+`--stage` (splash, ready, typed, done); see Usage.
 
 ---
 
@@ -242,6 +310,7 @@ train/intref.py    bit-exact integer reference of the Z80 engine + quantiser
 export/pack.py     checkpoint -> integers, LUTs -> ASCII8 data banks + manifest
 z80/engine.asm     the MSX engine (sjasmplus)
 build.py           export + assemble
+docs/make_banner.py  README banner SVG + SCREEN 2 splash bitmap
 tests/             golden tests, test suite, VRAM screenshot
 ```
 
@@ -252,7 +321,11 @@ tests/             golden tests, test suite, VRAM screenshot
   Its sharing conditions apply when you redistribute the *data*, and trained models count
   as "Results", which those conditions don't cover. The data is not committed here: `data/` is
   gitignored. The first 250 MB of the training file (73 M tokens) was used.
-* Training: __TRAINING__
+* Training: 90 minutes of wall-clock time on a CPU (10 threads, ~16.4 K tokens/s), with
+  10,552 AdamW steps of 64 × 128 tokens = **86 M tokens** (≈1.2 passes over the 73 M-token
+  subset). The learning rate is 3e-3, with 200 warm-up steps and cosine decay to 5%; no
+  weight decay; gradients clipped at 1.0. Truncated backprop through time carries state
+  across 128-token windows. Final validation loss is 2.50.
 * `<eos>` resets the hidden state to zero in training, which matches inference (the MSX
   starts from h=0 and feeds `<eos>` before the prompt).
 
@@ -260,18 +333,29 @@ tests/             golden tests, test suite, VRAM screenshot
 
 * **Not tested on real hardware.** It has only been tested in openMSX 22.0 on the C-BIOS
   MSX1 machines; proprietary MSX system ROMs were not available here. The engine only uses
-  documented Z80 instructions, standard BIOS calls (`CHGET`, `CHPUT`, `INITXT`) and
-  standard slot switching, which includes expanded RAM slots. It is still a hardware test
-  waiting to happen.
+  documented Z80 instructions, standard BIOS calls (`CHGET`, `CHPUT`, `INITXT`,
+  `INIGRP`, `LDIRVM`, `FILVRM`) and standard slot switching. With an expanded RAM slot it
+  also updates the BIOS slot table (SLTTBL), so later inter-slot calls, such as a disk
+  ROM's timer hook, can't switch the RAM away. Two throwaway openMSX machine definitions
+  checked the slot code: a 16 KB MSX1 shows "MSX-LLM needs 32 KB of RAM." instead of
+  crashing, and an MSX1 with its RAM in subslot 3-0 passes the golden test bit-exactly.
+  It is still a hardware test waiting to happen.
+* **RAM must be in one slot**: page 2 is mapped to the same (sub)slot as page 3's RAM, as
+  on almost every MSX1. A machine that splits its 32 KB across two subslots gets the
+  "needs 32 KB" message.
 * **Quality is "coherent-ish" at best.** It is a 0.9 M-parameter ternary RNN trained for
   90 minutes on a CPU. Grammar is mostly local, stories drift, and names and objects
   don't persist across sentences.
 * **Fixed shape assumptions in the engine**: E = 128, H and E+H multiples of 64,
   E+H ≤ 512, 2H ≤ 1024, V ≤ 1024, vocab strings ≤ 7 KB.
+* **Word wrap is per token**: a word ends by column 39, so a following `,` or `.` still
+  fits in column 40. A word split across several tokens can still break at the margin.
 * **Sampling settings are baked in at export**: temperature, top-K and max length (48
-  tokens). The prompt is limited to 119 characters.
-* **int16 accumulators can wrap** in theory. The reference reproduces the wrap
-  bit-exactly, but it would hurt the output. It has never been observed.
+  tokens). The exporter rejects top-K outside 1-16 and max length outside 1-135, the
+  limits of the engine's buffers. The prompt is limited to 119 characters.
+* **int16 accumulators can wrap** in theory (worst case about ±68,000). The reference
+  reproduces the wrap bit-exactly, but it would hurt the output. On 48,000 validation
+  steps the largest value seen was 8,754, which is 3.7× headroom.
 * **openMSX automation quirk**: with C-BIOS, keys sent by openMSX's `type` command in the
   first ~1.5 s after the prompt appears get lost. The harness waits 4 s. Human typing
   isn't affected in practice.
