@@ -35,7 +35,7 @@ PROMPT  equ 0AD00h              ; ' ' + typed text
 HIST    equ 0AE00h              ; 256 x u16 token history
 ATAB    equ 0B100h              ; 9 x s16 partial sums of inputs 0,1
 BTAB    equ 0B120h              ; 9 x s16 partial sums of inputs 2,3
-STACK   equ 0F000h
+STACK   equ 0C000h               ; grows down into B300h-BFFFh (page 2 only)
 
 ; ---- manifest (copied from bank 1 offset 0 to MAN) ---------------------------
 M_E     equ 8
